@@ -352,7 +352,7 @@ fn main() {
 
             let handle = app.handle().clone();
 
-            // Native Menu Setup
+            #[cfg(not(target_os = "windows"))]
             let _ = lotion_rs::menu::create_main_menu(&handle);
 
             let security_state = handle
