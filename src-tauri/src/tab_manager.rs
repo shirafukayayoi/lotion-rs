@@ -70,16 +70,51 @@ impl<R: Runtime> TabManager<R> {
         }
     }
 
-    pub fn create_tab(&self, app: &AppHandle<R>, window_id: &str, url: &str) -> tauri::Result<String> {
+    pub fn create_tab(
+        &self,
+        app: &AppHandle<R>,
+        window_id: &str,
+        url: &str,
+    ) -> tauri::Result<String> {
         let tab_id = uuid::Uuid::new_v4().to_string();
 
+        {
+            let state = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+            let mut state = state.blocking_lock();
+            state.register_tab(
+                window_id,
+                crate::state::TabState {
+                    id: tab_id.clone(),
+                    title: "Notion".to_string(),
+                    url: url.to_string(),
+                    is_active: true,
+                    is_pinned: false,
+                },
+            );
+        }
+
         let tab_controller =
-            TabController::new(app, window_id, tab_id.clone(), url, self.litebox.clone())?;
+            match TabController::new(app, window_id, tab_id.clone(), url, self.litebox.clone()) {
+                Ok(tab) => tab,
+                Err(error) => {
+                    let state = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+                    state.blocking_lock().remove_tab(&tab_id);
+                    return Err(error);
+                }
+            };
 
         self.tabs
             .write()
             .expect("TabManager: tabs write lock poisoned")
             .insert(tab_id.clone(), Arc::new(tab_controller));
+
+        let state = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+        let state = state.blocking_lock();
+        if let Some(secret) = app.try_state::<Arc<Vec<u8>>>() {
+            if let Err(error) = state.save_to_disk(secret.inner().as_slice()) {
+                log::error!("Failed to save new tab state: {}", error);
+            }
+        }
 
         log::info!("TabManager: Created tab {}", tab_id);
         Ok(tab_id)

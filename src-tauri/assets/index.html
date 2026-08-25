@@ -1,32 +1,267 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>lotion-rs engine</title>
-    <!-- 
-      This is a minimal index.html for lotion-rs engine's background window.
-      The actual UI is rendered by native Iced controls and tabs are loaded
-      dynamically by the TabOrchestrator navigating WebViews to notion.so.
-    -->
-    <style>
-        body {
-            background-color: transparent;
-            margin: 0;
-            overflow: hidden;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            color: #333;
-            font-family: system-ui, -apple-system, sans-serif;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lotion-rs tabs</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+      background: #efeeeb;
+      color: #37352f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    body {
+      display: flex;
+      align-items: stretch;
+      padding: 5px 8px 0;
+      border-bottom: 1px solid rgba(55, 53, 47, 0.14);
+      background: #efeeeb;
+    }
+
+    #tabs {
+      display: flex;
+      flex: 1;
+      min-width: 0;
+      gap: 4px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: none;
+    }
+
+    #tabs::-webkit-scrollbar {
+      display: none;
+    }
+
+    .tab {
+      display: flex;
+      align-items: center;
+      flex: 0 1 210px;
+      min-width: 110px;
+      max-width: 230px;
+      height: 36px;
+      padding: 0 8px 0 10px;
+      gap: 8px;
+      border: 1px solid transparent;
+      border-bottom: 0;
+      border-radius: 8px 8px 0 0;
+      color: #6f6d67;
+      background: transparent;
+      cursor: default;
+      transition: background-color 100ms ease, color 100ms ease;
+    }
+
+    .tab:hover {
+      background: rgba(255, 255, 255, 0.54);
+      color: #37352f;
+    }
+
+    .tab.active {
+      color: #2f2e2b;
+      background: #ffffff;
+      border-color: rgba(55, 53, 47, 0.12);
+      box-shadow: 0 -1px 4px rgba(15, 15, 15, 0.04);
+    }
+
+    .favicon {
+      width: 16px;
+      height: 16px;
+      flex: 0 0 16px;
+      border-radius: 3px;
+    }
+
+    .title {
+      min-width: 0;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .close,
+    #new-tab {
+      display: grid;
+      place-items: center;
+      border: 0;
+      color: inherit;
+      background: transparent;
+      font-family: inherit;
+    }
+
+    .close {
+      width: 22px;
+      height: 22px;
+      flex: 0 0 22px;
+      border-radius: 5px;
+      font-size: 17px;
+      line-height: 1;
+      opacity: 0;
+    }
+
+    .tab:hover .close,
+    .tab.active .close {
+      opacity: 0.62;
+    }
+
+    .close:hover,
+    #new-tab:hover {
+      background: rgba(55, 53, 47, 0.1);
+      opacity: 1;
+    }
+
+    #new-tab {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
+      margin: 1px 0 0 5px;
+      border-radius: 7px;
+      font-size: 21px;
+      cursor: default;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root,
+      body {
+        color: #d7d5d0;
+        background: #252525;
+      }
+
+      body {
+        border-bottom-color: rgba(255, 255, 255, 0.1);
+      }
+
+      .tab {
+        color: #aaa8a3;
+      }
+
+      .tab:hover {
+        color: #efefed;
+        background: rgba(255, 255, 255, 0.07);
+      }
+
+      .tab.active {
+        color: #efefed;
+        background: #191919;
+        border-color: rgba(255, 255, 255, 0.1);
+      }
+
+      .close:hover,
+      #new-tab:hover {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      .favicon {
+        filter: invert(1);
+      }
+    }
+  </style>
 </head>
-
 <body>
-    <div id="loader">Initializing lotion-rs engine...</div>
-</body>
+  <div id="tabs" role="tablist" aria-label="Notion tabs"></div>
+  <button id="new-tab" type="button" title="New tab (Ctrl+T)" aria-label="New tab">+</button>
 
+  <script>
+    const tabsElement = document.getElementById("tabs");
+    const newTabButton = document.getElementById("new-tab");
+    const invoke = window.__TAURI__?.core?.invoke;
+    let lastState = "";
+
+    async function refreshTabs() {
+      if (!invoke) return;
+      const tabs = await invoke("get_window_tabs", { windowId: "main" });
+      const state = JSON.stringify(tabs);
+      if (state === lastState) return;
+      lastState = state;
+
+      tabsElement.replaceChildren(...tabs.map((tab) => {
+        const element = document.createElement("div");
+        element.className = `tab${tab.is_active ? " active" : ""}`;
+        element.role = "tab";
+        element.ariaSelected = String(tab.is_active);
+        element.title = tab.title || "Notion";
+        element.addEventListener("click", () => {
+          if (!tab.is_active) invoke("switch_tab", { tabId: tab.id });
+        });
+
+        const icon = document.createElement("img");
+        icon.className = "favicon";
+        icon.src = "notion-icon.svg";
+        icon.alt = "";
+
+        const title = document.createElement("span");
+        title.className = "title";
+        title.textContent = tab.title || "Notion";
+
+        const close = document.createElement("button");
+        close.className = "close";
+        close.type = "button";
+        close.title = "Close tab (Ctrl+W)";
+        close.ariaLabel = `Close ${tab.title || "Notion"}`;
+        close.textContent = "×";
+        close.addEventListener("click", (event) => {
+          event.stopPropagation();
+          invoke("close_tab", { tabId: tab.id });
+        });
+
+        element.append(icon, title, close);
+        return element;
+      }));
+
+      tabsElement.querySelector(".tab.active")?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+        inline: "nearest"
+      });
+    }
+
+    newTabButton.addEventListener("click", () => {
+      invoke?.("new_tab", { windowId: "main" });
+    });
+
+    tabsElement.addEventListener("wheel", (event) => {
+      if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+        tabsElement.scrollLeft += event.deltaY;
+        event.preventDefault();
+      }
+    }, { passive: false });
+
+    document.addEventListener("keydown", (event) => {
+      if (!invoke || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === "t") {
+        event.preventDefault();
+        invoke("new_tab", { windowId: "main" });
+      } else if (key === "w") {
+        event.preventDefault();
+        const active = tabsElement.querySelector(".tab.active .close");
+        active?.click();
+      } else if (event.key === "Tab") {
+        event.preventDefault();
+        invoke("switch_relative_tab", {
+          windowId: "main",
+          direction: event.shiftKey ? -1 : 1
+        });
+      }
+    });
+
+    refreshTabs();
+    setInterval(refreshTabs, 500);
+  </script>
+</body>
 </html>

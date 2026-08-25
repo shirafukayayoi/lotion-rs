@@ -15,6 +15,7 @@
         }
     },
     "app": {
+        "withGlobalTauri": true,
         "security": {
             "csp": "default-src 'self' notion.so *.notion.so notion-static.com tauri://localhost wry://localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval' notion.so *.notion.so notion-static.com tauri://localhost wry://localhost; connect-src 'self' notion.so *.notion.so notion-static.com tauri://localhost wry://localhost; img-src 'self' data: blob: notion.so *.notion.so notion-static.com; style-src 'self' 'unsafe-inline' notion.so *.notion.so; font-src 'self' data: notion.so *.notion.so;"
         }

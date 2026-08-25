@@ -43,11 +43,16 @@ impl<R: Runtime> TabController<R> {
         let webview_builder =
             create_secure_webview_builder(app, &tab_id, &url, window_id, policy.clone());
 
-        let inner_size = window.inner_size()?;
+        let inner_size = window
+            .inner_size()?
+            .to_logical::<f64>(window.scale_factor()?);
         let webview = window.add_child(
             webview_builder,
-            tauri::LogicalPosition::new(0.0, 0.0),
-            tauri::LogicalSize::new(inner_size.width as f64, inner_size.height as f64),
+            tauri::LogicalPosition::new(0.0, crate::window_controller::TAB_BAR_HEIGHT),
+            tauri::LogicalSize::new(
+                inner_size.width,
+                (inner_size.height - crate::window_controller::TAB_BAR_HEIGHT).max(1.0),
+            ),
         )?;
 
         log::info!("Created tab webview: {} in window: {}", tab_id, window_id);
@@ -57,213 +62,14 @@ impl<R: Runtime> TabController<R> {
         let active_theme = theming.get_active_theme();
         theming.inject_theme(&webview, &active_theme);
 
-        // Inject title observer and custom Mac-style Window Controls
-        let title_observer_js = format!(
-            r#"
-            (function() {{
-                const tabId = '{0}';
-
-                // 1. Title Observer
-                let lastTitle = document.title;
-                const observer = new MutationObserver(function() {{
-                    if (document.title !== lastTitle) {{
-                        lastTitle = document.title;
-                        if (window.__TAURI__) {{
-                            window.__TAURI__.invoke('update_tab_state', {{
-                                tabId: tabId,
-                                title: lastTitle,
-                                url: window.location.href
-                            }});
-                        }}
-                    }}
-                }});
-                observer.observe(document.querySelector('title') || document.head, {{
-                    subtree: true, characterData: true, childList: true
-                }});
-
-                // 2. Inject Native-feeling Window Controls (Titlebar)
-                window.addEventListener('DOMContentLoaded', () => {{
-                    if ({2}) return;
-
-                    const titlebar = document.createElement('div');
-                    titlebar.id = 'lotion-custom-titlebar';
-                    titlebar.setAttribute('data-tauri-drag-region', '');
-                    titlebar.style.cssText = `
-                        position: fixed;
-                        top: 0;
-                        left: 0;
-                        width: 100%;
-                        height: 38px;
-                        z-index: 999999;
-                        display: flex;
-                        align-items: center;
-                        padding-left: 12px;
-                        pointer-events: none;
-                        background: inherit;
-                        border-bottom: 1px solid rgba(0,0,0,0.05);
-                    `;
-
-                    // Push the Notion sidebar down slightly so it doesn't overlap the buttons
-                    const style = document.createElement('style');
-                    style.textContent = `
-                        .notion-sidebar-container {{ margin-top: 38px !important; }}
-                        .notion-topbar {{ padding-left: 80px !important; }}
-                        .lotion-tab {{
-                            padding: 4px 12px;
-                            font-size: 12px;
-                            border-radius: 6px 6px 0 0;
-                            cursor: pointer;
-                            display: flex;
-                            align-items: center;
-                            gap: 8px;
-                            max-width: 150px;
-                            overflow: hidden;
-                            white-space: nowrap;
-                            text-overflow: ellipsis;
-                            background: rgba(0,0,0,0.05);
-                            border: 1px solid rgba(0,0,0,0.1);
-                            border-bottom: none;
-                            pointer-events: auto;
-                        }}
-                        .lotion-tab.active {{
-                            background: white;
-                            font-weight: 500;
-                        }}
-                        .lotion-tab-close {{
-                            font-size: 14px;
-                            opacity: 0.5;
-                            transition: opacity 0.2s;
-                        }}
-                        .lotion-tab-close:hover {{
-                            opacity: 1;
-                        }}
-                    `;
-                    document.head.appendChild(style);
-
-                    const btnContainer = document.createElement('div');
-                    btnContainer.style.cssText = `
-                        display: flex;
-                        gap: 8px;
-                        align-items: center;
-                        pointer-events: auto;
-                    `;
-
-                    const createBtn = (color, clickHandler, label = "") => {{
-                        const btn = document.createElement('div');
-                        btn.style.cssText = `
-                            width: 12px; height: 12px;
-                            border-radius: 50%;
-                            background-color: ${{color}};
-                            cursor: pointer;
-                            border: 1px solid rgba(0,0,0,0.1);
-                            display: flex; align-items: center; justify-content: center;
-                            font-size: 8px; font-family: sans-serif;
-                        `;
-                        if (label) btn.innerText = label;
-                        btn.addEventListener('click', (e) => {{
-                            e.stopPropagation();
-                            clickHandler();
-                        }});
-                        return btn;
-                    }};
-
-                    const closeBtn = createBtn('#ff5f56', () => {{
-                        if (window.__TAURI__) {{
-                            window.__TAURI__.invoke('close_window', {{ windowId: '{1}' }});
-                        }}
-                    }});
-
-                    const minBtn = createBtn('#ffbd2e', () => {{
-                        if (window.__TAURI__) {{
-                            window.__TAURI__.invoke('minimize_window', {{ windowId: '{1}' }});
-                        }}
-                    }});
-
-                    const maxBtn = createBtn('#27c93f', () => {{
-                        if (window.__TAURI__) {{
-                            window.__TAURI__.invoke('maximize_window', {{ windowId: '{1}' }});
-                        }}
-                    }});
-
-
-                    btnContainer.appendChild(closeBtn);
-                    btnContainer.appendChild(minBtn);
-                    btnContainer.appendChild(maxBtn);
-
-                    const spacer = document.createElement('div');
-                    spacer.style.width = '24px';
-                    btnContainer.appendChild(spacer);
-
-                    const tabList = document.createElement('div');
-                    tabList.style.cssText = `
-                        display: flex;
-                        gap: 4px;
-                        align-items: flex-end;
-                        height: 100%;
-                        padding-top: 8px;
-                        pointer-events: auto;
-                    `;
-
-                    const renderTabs = async () => {{
-                        if (!window.__TAURI__) return;
-                        const tabs = await window.__TAURI__.invoke('get_window_tabs', {{ windowId: '{1}' }});
-                        tabList.innerHTML = '';
-                        tabs.forEach(t => {{
-                            const tabEl = document.createElement('div');
-                            tabEl.className = 'lotion-tab' + (t.id === tabId ? ' active' : '');
-                            tabEl.innerText = t.title || 'Notion';
-
-                            const closeX = document.createElement('span');
-                            closeX.className = 'lotion-tab-close';
-                            closeX.innerText = ' ×';
-                            closeX.onclick = (e) => {{
-                                e.stopPropagation();
-                                window.__TAURI__.invoke('close_tab', {{ tabId: t.id }});
-                            }};
-
-                            tabEl.appendChild(closeX);
-                            tabEl.onclick = () => {{
-                                if (t.id !== tabId) {{
-                                    window.__TAURI__.invoke('switch_tab', {{ tabId: t.id }});
-                                }}
-                            }};
-                            tabList.appendChild(tabEl);
-                        }});
-
-                        const newTab = createBtn('#27c93f', () => {{
-                            if (window.__TAURI__) {{
-                                window.__TAURI__.invoke('new_tab', {{ windowId: '{1}' }});
-                            }}
-                        }}, '+');
-                        newTab.style.marginLeft = '8px';
-                        newTab.style.marginBottom = '6px';
-                        tabList.appendChild(newTab);
-                    }};
-
-                    btnContainer.appendChild(tabList);
-                    titlebar.appendChild(btnContainer);
-                    document.body.appendChild(titlebar);
-
-                    renderTabs();
-                    // Poll for tab changes (simple for now)
-                    setInterval(renderTabs, 5000);
-                }});
-            }})();
-        "#,
-            tab_id,
-            window_id,
-            cfg!(target_os = "windows")
-        );
-        let _ = webview.eval(&title_observer_js);
-
         // Inject network monitor — intercepts fetch and XHR to log status/errors
         let network_monitor_js = r#"
             (function() {
                 const log = (msg) => {
                     console.log(msg);
-                    if (window.__TAURI__) {
+                    if (window.__TAURI__?.core?.invoke) {
                         // The log_network_event command in Rust has origin validation and truncation.
-                        window.__TAURI__.invoke('log_network_event', { event: msg });
+                        window.__TAURI__.core.invoke('log_network_event', { event: msg });
                     }
                 };
 
@@ -354,7 +160,11 @@ impl<R: Runtime> TabController<R> {
 /// Guaranteeing that any nested popups (e.g. nested OAuth flows) inherit
 /// the exact same zero-trust `on_navigation` and `on_new_window` policies
 /// as their parent window via the TabController factory.
-pub fn spawn_secure_popup<R: Runtime>(app: &AppHandle<R>, _policy: Arc<dyn PolicyEnforcer>, url: Url) {
+pub fn spawn_secure_popup<R: Runtime>(
+    app: &AppHandle<R>,
+    _policy: Arc<dyn PolicyEnforcer>,
+    url: Url,
+) {
     log::info!(
         "Intercepted popup request. Routing into a secure in-app tab: {}",
         url.as_str()
@@ -365,8 +175,18 @@ pub fn spawn_secure_popup<R: Runtime>(app: &AppHandle<R>, _policy: Arc<dyn Polic
     // to a single window and enforces all Zero-Trust policies recursively since
     // create_tab() uses the TabController factory.
     if let Some(orchestrator) = app.try_state::<Arc<dyn crate::traits::TabOrchestrator<R>>>() {
-        if let Err(e) = orchestrator.inner().create_tab(app, "main", url.as_str()) {
-            log::error!("Zero-Trust: Failed to route popup into managed tab: {}", e);
+        match orchestrator.inner().create_tab(app, "main", url.as_str()) {
+            Ok(tab_id) => {
+                if let Err(error) = orchestrator.inner().show_tab(&tab_id) {
+                    log::error!("Failed to show popup tab: {}", error);
+                }
+            }
+            Err(error) => {
+                log::error!(
+                    "Zero-Trust: Failed to route popup into managed tab: {}",
+                    error
+                )
+            }
         }
     } else {
         log::error!("Zero-Trust: Cannot spawn tab securely. TabOrchestrator missing from state.");
@@ -382,15 +202,28 @@ pub fn create_secure_webview_builder<R: Runtime>(
     window_id: &str,
     policy: Arc<dyn PolicyEnforcer>,
 ) -> WebviewBuilder<R> {
-    let webview_builder = WebviewBuilder::new(label, WebviewUrl::External(url.clone()));
+    let webview_builder = WebviewBuilder::new(label, WebviewUrl::External(url.clone()))
+        .initialization_script(tab_shortcuts_script(label, window_id));
 
     let nav_app = app.clone();
     let nav_policy = policy.clone();
     let popup_app = app.clone();
     let popup_policy = policy.clone();
     let window_id_owned = window_id.to_string();
+    let title_app = app.clone();
+    let title_tab_id = label.to_string();
+    let load_app = app.clone();
+    let load_tab_id = label.to_string();
 
     webview_builder
+        .on_document_title_changed(move |webview, title| {
+            if let Ok(url) = webview.url() {
+                persist_tab_metadata(&title_app, &title_tab_id, Some(title), url.as_str());
+            }
+        })
+        .on_page_load(move |_, payload| {
+            persist_tab_metadata(&load_app, &load_tab_id, None, payload.url().as_str());
+        })
         .on_navigation(move |url| {
             let window_id = &window_id_owned;
             let url_str = url.as_str();
@@ -420,26 +253,11 @@ pub fn create_secure_webview_builder<R: Runtime>(
                             if let Some(orchestrator) =
                                 nav_app.try_state::<Arc<dyn crate::traits::TabOrchestrator<R>>>()
                             {
-                                if let Ok(new_id) =
-                                    orchestrator.inner().create_tab(&nav_app, window_id, notion_url)
+                                if let Ok(new_id) = orchestrator
+                                    .inner()
+                                    .create_tab(&nav_app, window_id, notion_url)
                                 {
                                     let _ = orchestrator.inner().show_tab(&new_id);
-
-                                    // Update AppState
-                                    if let Some(state_lock) = nav_app.try_state::<Arc<
-                                        tokio::sync::Mutex<crate::state::AppState>,
-                                    >>() {
-                                        let mut app_state = state_lock.blocking_lock();
-                                        if let Some(w_state) = app_state.windows.get_mut(window_id) {
-                                            w_state.tab_ids.push(new_id);
-                                            // Get app_secret from state
-                                            if let Some(app_secret_state) = nav_app.try_state::<Arc<Vec<u8>>>() {
-                                                let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
-                                            } else {
-                                                log::error!("Zero-Trust: App secret not found in state when trying to save AppState after new tab creation.");
-                                            }
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -495,4 +313,67 @@ pub fn create_secure_webview_builder<R: Runtime>(
                 tauri::webview::NewWindowResponse::Deny
             }
         })
+}
+
+fn tab_shortcuts_script(tab_id: &str, window_id: &str) -> String {
+    format!(
+        r#"
+document.addEventListener("keydown", async (event) => {{
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke || !(event.ctrlKey || event.metaKey) || event.altKey) return;
+
+  const key = event.key.toLowerCase();
+  if (key === "t") {{
+    event.preventDefault();
+    await invoke("new_tab", {{ windowId: "{window_id}" }});
+  }} else if (key === "w") {{
+    event.preventDefault();
+    await invoke("close_tab", {{ tabId: "{tab_id}" }});
+  }} else if (event.key === "Tab") {{
+    event.preventDefault();
+    await invoke("switch_relative_tab", {{
+      windowId: "{window_id}",
+      direction: event.shiftKey ? -1 : 1
+    }});
+  }}
+}}, true);
+"#
+    )
+}
+
+fn persist_tab_metadata<R: Runtime>(
+    app: &AppHandle<R>,
+    tab_id: &str,
+    title: Option<String>,
+    url: &str,
+) {
+    let is_notion_url = Url::parse(url)
+        .ok()
+        .filter(|url| url.scheme() == "https")
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host == "notion.so"
+                || host.ends_with(".notion.so")
+                || host == "notion.com"
+                || host.ends_with(".notion.com")
+        });
+    if !is_notion_url {
+        return;
+    }
+
+    let state = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+    let mut state = state.blocking_lock();
+    let Some(tab) = state.tabs.get_mut(tab_id) else {
+        return;
+    };
+    if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+        tab.title = title;
+    }
+    tab.url = url.to_string();
+
+    if let Some(secret) = app.try_state::<Arc<Vec<u8>>>() {
+        if let Err(error) = state.save_to_disk(secret.inner().as_slice()) {
+            log::error!("Failed to save tab metadata: {}", error);
+        }
+    }
 }

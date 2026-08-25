@@ -8,13 +8,13 @@ use lotion_rs::config::LotionConfig;
 use lotion_rs::i18n::I18nManager;
 use lotion_rs::spellcheck::SpellcheckManager;
 use lotion_rs::state::AppState;
-use std::sync::Arc;
-use tauri::Manager;
+use rand::RngCore;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::PermissionsExt; // Specific import for unix permissions
-use rand::RngCore;
+use std::sync::Arc;
+use tauri::Manager;
 
 const SECRET_FILE_NAME: &str = "secret_key";
 
@@ -32,9 +32,12 @@ fn get_or_create_app_secret() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         log::info!("Application secret loaded from {}", secret_path.display());
         Ok(secret)
     } else {
-        log::info!("Generating new application secret at {}", secret_path.display());
+        log::info!(
+            "Generating new application secret at {}",
+            secret_path.display()
+        );
         fs::create_dir_all(&secret_dir)?;
-        
+
         let mut secret = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut secret);
 
@@ -51,17 +54,17 @@ fn get_or_create_app_secret() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
 // Helper function to check if the command invocation origin is trusted
 fn is_trusted_origin<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> bool {
-    // In a real application, this list of trusted origins would be configurable
-    // and potentially loaded from a secure source.
-    let trusted_origins = vec![
-        "https://www.notion.so",
-        "https://lotion.app", // Example of a self-controlled origin
-        "tauri://localhost", // For local development/devtools
-    ];
-
     if let Ok(url) = webview.url() {
         let origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
-        let is_trusted = trusted_origins.iter().any(|o| origin.starts_with(o));
+        let host = url.host_str().unwrap_or_default();
+        let is_notion = url.scheme() == "https"
+            && (host == "notion.so"
+                || host.ends_with(".notion.so")
+                || host == "notion.com"
+                || host.ends_with(".notion.com"));
+        let is_local = matches!(url.scheme(), "tauri" | "wry") && host == "localhost"
+            || matches!(url.scheme(), "http" | "https") && host == "tauri.localhost";
+        let is_trusted = is_notion || is_local;
         if !is_trusted {
             log::warn!("Untrusted origin: {} attempted to invoke command.", origin);
         }
@@ -81,7 +84,7 @@ fn get_window_tabs(
     if !is_trusted_origin(&webview) {
         return Vec::new(); // Deny access for untrusted origins
     }
-    log::info!("get_window_tabs called from origin: {:?}", webview.url());
+    log::debug!("get_window_tabs called from origin: {:?}", webview.url());
     let app_state = state.blocking_lock();
     if let Some(w_state) = app_state.windows.get(&window_id) {
         w_state
@@ -96,67 +99,130 @@ fn get_window_tabs(
 }
 
 #[tauri::command]
-fn switch_tab(
+async fn switch_tab(
     webview: tauri::Webview<tauri::Wry>,
     tab_id: String,
-    orchestrator: tauri::State<'_, Arc<dyn lotion_rs::traits::TabOrchestrator<tauri::Wry>>>,
-) {
-    if !is_trusted_origin(&webview) {
-        return; // Deny access for untrusted origins
-    }
-    let _ = orchestrator.show_tab(&tab_id);
-}
-
-#[tauri::command]
-fn close_tab(
-    webview: tauri::Webview<tauri::Wry>,
-    tab_id: String,
-    _app: tauri::AppHandle<tauri::Wry>,
     orchestrator: tauri::State<'_, Arc<dyn lotion_rs::traits::TabOrchestrator<tauri::Wry>>>,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<AppState>>>,
     app_secret_state: tauri::State<'_, Arc<Vec<u8>>>,
-) {
+) -> Result<(), String> {
     if !is_trusted_origin(&webview) {
-        return; // Deny access for untrusted origins
+        return Err("Untrusted origin".into());
     }
-    let _ = orchestrator.destroy_tab(&tab_id);
-
-    let mut app_state = state.blocking_lock();
-    app_state.tabs.remove(&tab_id);
-    for window_state in app_state.windows.values_mut() {
-        window_state.tab_ids.retain(|id| id != &tab_id);
-        if window_state.active_tab_id.as_ref() == Some(&tab_id) {
-            window_state.active_tab_id = window_state.tab_ids.last().cloned();
-            if let Some(ref next_id) = window_state.active_tab_id {
-                let _ = orchestrator.show_tab(next_id);
-            }
-        }
+    orchestrator
+        .show_tab(&tab_id)
+        .map_err(|error| error.to_string())?;
+    let mut app_state = state.lock().await;
+    if app_state.activate_tab(&tab_id) {
+        let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
     }
-    let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
+    Ok(())
 }
 
 #[tauri::command]
-fn new_tab(
+async fn switch_relative_tab(
     webview: tauri::Webview<tauri::Wry>,
     window_id: String,
+    direction: i32,
+    orchestrator: tauri::State<'_, Arc<dyn lotion_rs::traits::TabOrchestrator<tauri::Wry>>>,
+    state: tauri::State<'_, Arc<tokio::sync::Mutex<AppState>>>,
+    app_secret_state: tauri::State<'_, Arc<Vec<u8>>>,
+) -> Result<(), String> {
+    if !is_trusted_origin(&webview) {
+        return Err("Untrusted origin".into());
+    }
+
+    let target_id = {
+        let app_state = state.lock().await;
+        let Some(window) = app_state.windows.get(&window_id) else {
+            return Ok(());
+        };
+        if window.tab_ids.is_empty() {
+            return Ok(());
+        }
+        let current = window
+            .active_tab_id
+            .as_ref()
+            .and_then(|id| window.tab_ids.iter().position(|candidate| candidate == id))
+            .unwrap_or(0) as i32;
+        let next = (current + direction).rem_euclid(window.tab_ids.len() as i32) as usize;
+        window.tab_ids[next].clone()
+    };
+
+    orchestrator
+        .show_tab(&target_id)
+        .map_err(|error| error.to_string())?;
+    let mut app_state = state.lock().await;
+    app_state.activate_tab(&target_id);
+    let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
+    Ok(())
+}
+
+#[tauri::command]
+async fn close_tab(
+    webview: tauri::Webview<tauri::Wry>,
+    tab_id: String,
     app: tauri::AppHandle<tauri::Wry>,
     orchestrator: tauri::State<'_, Arc<dyn lotion_rs::traits::TabOrchestrator<tauri::Wry>>>,
     state: tauri::State<'_, Arc<tokio::sync::Mutex<AppState>>>,
     app_secret_state: tauri::State<'_, Arc<Vec<u8>>>,
-) {
+) -> Result<(), String> {
     if !is_trusted_origin(&webview) {
-        return; // Deny access for untrusted origins
+        return Err("Untrusted origin".into());
     }
-    let notion_url = "https://www.notion.so";
-    if let Ok(new_id) = orchestrator.create_tab(&app, &window_id, notion_url) {
-        let _ = orchestrator.show_tab(&new_id);
+    orchestrator
+        .destroy_tab(&tab_id)
+        .map_err(|error| error.to_string())?;
 
-        let mut app_state = state.blocking_lock();
-        if let Some(w_state) = app_state.windows.get_mut(&window_id) {
-            w_state.tab_ids.push(new_id);
-            let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
+    let next = {
+        let mut app_state = state.lock().await;
+        let next = app_state.remove_tab(&tab_id);
+        let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
+        next
+    };
+
+    if let Some((window_id, next_tab_id)) = next {
+        if let Some(next_tab_id) = next_tab_id {
+            orchestrator
+                .show_tab(&next_tab_id)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let create_orchestrator = Arc::clone(orchestrator.inner());
+            let new_id = tokio::task::spawn_blocking(move || {
+                create_orchestrator.create_tab(&app, &window_id, "https://www.notion.so")
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+            orchestrator
+                .show_tab(&new_id)
+                .map_err(|error| error.to_string())?;
         }
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn new_tab(
+    webview: tauri::Webview<tauri::Wry>,
+    window_id: String,
+    app: tauri::AppHandle<tauri::Wry>,
+    orchestrator: tauri::State<'_, Arc<dyn lotion_rs::traits::TabOrchestrator<tauri::Wry>>>,
+) -> Result<(), String> {
+    if !is_trusted_origin(&webview) {
+        return Err("Untrusted origin".into());
+    }
+    let create_orchestrator = Arc::clone(orchestrator.inner());
+    let new_id = tokio::task::spawn_blocking(move || {
+        create_orchestrator.create_tab(&app, &window_id, "https://www.notion.so")
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    orchestrator
+        .show_tab(&new_id)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -189,26 +255,7 @@ fn update_tab_state(
     }
 
     let mut app_state = state.blocking_lock();
-
-    // Update or Insert TabState
-    app_state.tabs.insert(
-        tab_id.clone(),
-        lotion_rs::state::TabState {
-            id: tab_id.clone(),
-            title: title.clone(),
-            url: url.clone(),
-            is_active: true, // If it's sending updates, it's presumably the active one in its window
-            is_pinned: false,
-        },
-    );
-
-    // Find which window this tab belongs to and update active_tab_id
-    for window_state in app_state.windows.values_mut() {
-        if window_state.tab_ids.contains(&tab_id) {
-            window_state.active_tab_id = Some(tab_id.clone());
-        }
-    }
-
+    app_state.update_tab(&tab_id, title.clone(), url.clone());
     let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
     log::debug!(
         "[lotion-state] Updated tab {} (title: {}, url: {})",
@@ -219,7 +266,11 @@ fn update_tab_state(
 }
 
 #[tauri::command]
-fn minimize_window(webview: tauri::Webview<tauri::Wry>, window_id: String, app: tauri::AppHandle<tauri::Wry>) {
+fn minimize_window(
+    webview: tauri::Webview<tauri::Wry>,
+    window_id: String,
+    app: tauri::AppHandle<tauri::Wry>,
+) {
     if !is_trusted_origin(&webview) {
         return; // Deny access for untrusted origins
     }
@@ -229,7 +280,11 @@ fn minimize_window(webview: tauri::Webview<tauri::Wry>, window_id: String, app: 
 }
 
 #[tauri::command]
-fn maximize_window(webview: tauri::Webview<tauri::Wry>, window_id: String, app: tauri::AppHandle<tauri::Wry>) {
+fn maximize_window(
+    webview: tauri::Webview<tauri::Wry>,
+    window_id: String,
+    app: tauri::AppHandle<tauri::Wry>,
+) {
     if !is_trusted_origin(&webview) {
         return; // Deny access for untrusted origins
     }
@@ -243,7 +298,11 @@ fn maximize_window(webview: tauri::Webview<tauri::Wry>, window_id: String, app: 
 }
 
 #[tauri::command]
-fn close_window(webview: tauri::Webview<tauri::Wry>, window_id: String, app: tauri::AppHandle<tauri::Wry>) {
+fn close_window(
+    webview: tauri::Webview<tauri::Wry>,
+    window_id: String,
+    app: tauri::AppHandle<tauri::Wry>,
+) {
     if !is_trusted_origin(&webview) {
         return; // Deny access for untrusted origins
     }
@@ -286,8 +345,8 @@ fn main() {
     log::info!("Starting Lotion-rs...");
 
     // Get or create application secret
-    let app_secret = get_or_create_app_secret()
-        .expect("Failed to get or create application secret");
+    let app_secret =
+        get_or_create_app_secret().expect("Failed to get or create application secret");
     let app_secret_arc = Arc::new(app_secret);
 
     // Load user config
@@ -331,6 +390,7 @@ fn main() {
             update_tab_state,
             get_window_tabs,
             switch_tab,
+            switch_relative_tab,
             close_tab,
             new_tab,
             minimize_window,
@@ -361,7 +421,10 @@ fn main() {
                 .clone();
 
             // Spawn the main window directly via Tauri WindowController
-            match lotion_rs::window_controller::WindowController::<tauri::Wry>::new(&handle, security_state) {
+            match lotion_rs::window_controller::WindowController::<tauri::Wry>::new(
+                &handle,
+                security_state,
+            ) {
                 Ok(wc) => {
                     wc.setup_listeners(handle.clone());
                     let setup_handle = handle.clone();

@@ -1,6 +1,12 @@
 use crate::traits::{SecuritySandbox, TabOrchestrator};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, Runtime, Window, WindowBuilder};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewBuilder, WebviewUrl, Window,
+    WindowBuilder,
+};
+
+pub const TAB_BAR_HEIGHT: f64 = 42.0;
+pub const TAB_BAR_LABEL: &str = "tab-strip";
 
 pub struct WindowController<R: Runtime> {
     pub window: Window<R>,
@@ -40,7 +46,9 @@ impl<R: Runtime> WindowController<R> {
             if let Some(app_secret_state) = app.try_state::<Arc<Vec<u8>>>() {
                 let _ = app_state.save_to_disk(app_secret_state.inner().as_slice());
             } else {
-                log::error!("Zero-Trust: App secret not found in state when creating new window state.");
+                log::error!(
+                    "Zero-Trust: App secret not found in state when creating new window state."
+                );
             }
         }
 
@@ -75,9 +83,24 @@ impl<R: Runtime> WindowController<R> {
             tauri::WindowEvent::Resized(size) => {
                 log::debug!("Window {} resized to {:?}", window_label, size);
                 if let Some(w) = app_handle.get_window(&window_label) {
-                    let webviews = w.webviews();
-                    for webview in webviews {
-                        let _ = webview.set_size(*size);
+                    if let Ok(scale_factor) = w.scale_factor() {
+                        let logical_size = size.to_logical::<f64>(scale_factor);
+                        for webview in w.webviews() {
+                            if webview.label() == TAB_BAR_LABEL {
+                                let _ = webview.set_position(LogicalPosition::new(0.0, 0.0));
+                                let _ = webview.set_size(LogicalSize::new(
+                                    logical_size.width,
+                                    TAB_BAR_HEIGHT,
+                                ));
+                            } else {
+                                let _ = webview
+                                    .set_position(LogicalPosition::new(0.0, TAB_BAR_HEIGHT));
+                                let _ = webview.set_size(LogicalSize::new(
+                                    logical_size.width,
+                                    (logical_size.height - TAB_BAR_HEIGHT).max(1.0),
+                                ));
+                            }
+                        }
                     }
                 }
                 let app_state_lock =
@@ -113,6 +136,8 @@ impl<R: Runtime> WindowController<R> {
     }
 
     pub fn setup_tabs(&self, app: &AppHandle<R>) -> tauri::Result<()> {
+        self.setup_tab_bar()?;
+
         let tab_manager = {
             let mut attempts = 0;
             loop {
@@ -134,34 +159,60 @@ impl<R: Runtime> WindowController<R> {
         let mut tabs_restored = false;
 
         if config.restore_tabs {
-            let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
-            let mut app_state = app_state_lock.blocking_lock();
-
-            // Find state for THIS window
             let window_label = self.window.label();
-            if let Some(window_state) = app_state.windows.get_mut(window_label) {
-                log::info!(
-                    "WindowController: Restoring {} tabs from saved state.",
-                    window_state.tab_ids.len()
-                );
-                let old_tab_ids = window_state.tab_ids.clone();
-                window_state.tab_ids.clear();
+            let (saved_tabs, saved_active_tab_id) = {
+                let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+                let mut app_state = app_state_lock.blocking_lock();
+                let (old_tab_ids, active_tab_id) = app_state
+                    .windows
+                    .get(window_label)
+                    .map(|window| (window.tab_ids.clone(), window.active_tab_id.clone()))
+                    .unwrap_or_default();
+                let saved_tabs = old_tab_ids
+                    .iter()
+                    .filter_map(|id| {
+                        app_state
+                            .tabs
+                            .get(id)
+                            .map(|tab| (id.clone(), tab.url.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                for id in &old_tab_ids {
+                    app_state.tabs.remove(id);
+                }
+                if let Some(window) = app_state.windows.get_mut(window_label) {
+                    window.tab_ids.clear();
+                    window.active_tab_id = None;
+                }
+                (saved_tabs, active_tab_id)
+            };
 
-                for old_id in &old_tab_ids {
-                    if let Some(tab_state) = app_state.tabs.get(old_id) {
-                        let url = tab_state.url.clone();
-                        // Drop the borrow of app_state so we can call create_tab (which might use it)
-                        // and re-borrow window_state to update it.
-                        // Actually, create_tab doesn't need a lock on app_state, but we need to update window_state.
-                        let new_tab_id = tab_manager.create_tab(app, window_label, &url)?;
-
-                        // Re-fetch window_state to avoid borrow conflict
-                        if let Some(ws) = app_state.windows.get_mut(window_label) {
-                            ws.tab_ids.push(new_tab_id.clone());
+            log::info!(
+                "WindowController: Restoring {} tabs from saved state.",
+                saved_tabs.len()
+            );
+            let mut restored_ids = Vec::new();
+            let mut active_id = None;
+            for (old_id, url) in saved_tabs {
+                match tab_manager.create_tab(app, window_label, &url) {
+                    Ok(new_id) => {
+                        if saved_active_tab_id.as_ref() == Some(&old_id) {
+                            active_id = Some(new_id.clone());
                         }
-                        let _ = tab_manager.show_tab(&new_tab_id);
+                        restored_ids.push(new_id);
                         tabs_restored = true;
                     }
+                    Err(error) => log::warn!("Failed to restore tab {}: {}", old_id, error),
+                }
+            }
+
+            if let Some(active_id) = active_id.as_ref().or_else(|| restored_ids.last()) {
+                tab_manager.show_tab(active_id)?;
+                let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+                let mut app_state = app_state_lock.blocking_lock();
+                app_state.activate_tab(active_id);
+                if let Some(secret) = app.try_state::<Arc<Vec<u8>>>() {
+                    let _ = app_state.save_to_disk(secret.inner().as_slice());
                 }
             }
         }
@@ -173,16 +224,32 @@ impl<R: Runtime> WindowController<R> {
                 notion_url
             );
             let tab_id = tab_manager.create_tab(app, self.window.label(), notion_url)?;
-
-            let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
-            let mut app_state = app_state_lock.blocking_lock();
-            if let Some(window_state) = app_state.windows.get_mut(self.window.label()) {
-                window_state.tab_ids.push(tab_id.clone());
-            }
-
             let _ = tab_manager.show_tab(&tab_id);
         }
 
+        Ok(())
+    }
+
+    fn setup_tab_bar(&self) -> tauri::Result<()> {
+        if self
+            .window
+            .webviews()
+            .iter()
+            .any(|webview| webview.label() == TAB_BAR_LABEL)
+        {
+            return Ok(());
+        }
+
+        let logical_size = self
+            .window
+            .inner_size()?
+            .to_logical::<f64>(self.window.scale_factor()?);
+        let builder = WebviewBuilder::new(TAB_BAR_LABEL, WebviewUrl::App("index.html".into()));
+        self.window.add_child(
+            builder,
+            LogicalPosition::new(0.0, 0.0),
+            LogicalSize::new(logical_size.width, TAB_BAR_HEIGHT),
+        )?;
         Ok(())
     }
 }

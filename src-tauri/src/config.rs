@@ -58,7 +58,11 @@ impl LotionConfig {
         let new_dir = Self::config_dir();
 
         if old_dir.exists() && !new_dir.exists() {
-            log::info!("Migrating legacy config from {} to {}", old_dir.display(), new_dir.display());
+            log::info!(
+                "Migrating legacy config from {} to {}",
+                old_dir.display(),
+                new_dir.display()
+            );
             if let Err(e) = fs::create_dir_all(&new_dir) {
                 log::error!("Failed to create new config dir: {}", e);
                 return;
@@ -90,17 +94,21 @@ impl LotionConfig {
             match fs::read_to_string(&path) {
                 Ok(contents) => {
                     match toml::from_str::<LotionConfig>(&contents) {
-                        Ok(mut config) => { // 'mut' is needed to modify config.custom_css_path
+                        Ok(mut config) => {
+                            // 'mut' is needed to modify config.custom_css_path
                             if let Some(ref path) = config.custom_css_path {
                                 let custom_themes_dir = Self::config_dir().join("custom_themes");
                                 if !path.starts_with(&custom_themes_dir) {
                                     log::warn!("Custom CSS path '{}' is outside the designated custom themes directory. Discarding for security.", path.display());
                                     config.custom_css_path = None;
-                                } else if !path.extension().map_or(false, |ext| ext == "css") {
+                                } else if path.extension().is_none_or(|ext| ext != "css") {
                                     log::warn!("Custom CSS path '{}' does not have a .css extension. Discarding for security.", path.display());
                                     config.custom_css_path = None;
                                 } else if !path.exists() {
-                                    log::warn!("Custom CSS path '{}' does not exist. Discarding.", path.display());
+                                    log::warn!(
+                                        "Custom CSS path '{}' does not exist. Discarding.",
+                                        path.display()
+                                    );
                                     config.custom_css_path = None;
                                 }
                             }
@@ -111,7 +119,7 @@ impl LotionConfig {
                             log::warn!("Failed to parse config, using defaults: {}", e);
                         }
                     }
-                }, // End of Ok(contents) arm
+                } // End of Ok(contents) arm
                 Err(e) => {
                     log::warn!("Failed to read config file, using defaults: {}", e);
                 }
@@ -143,7 +151,6 @@ impl LotionConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
 
     #[test]
@@ -151,7 +158,7 @@ mod tests {
         let temp_base = tempfile::tempdir().unwrap();
         let old_dir = temp_base.path().join("lotion");
         let new_dir = temp_base.path().join("lotion-rs");
-        
+
         fs::create_dir_all(&old_dir).unwrap();
         fs::write(old_dir.join("config.toml"), "active_theme = 'nord'").unwrap();
         fs::write(old_dir.join("state.json"), "{}").unwrap();
