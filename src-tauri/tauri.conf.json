@@ -1,6 +1,6 @@
 {
     "productName": "lotion-rs",
-    "version": "0.2.4",
+    "version": "0.2.6",
     "identifier": "io.lotion-rs.secure.v2",
     "build": {
         "frontendDist": "assets"
