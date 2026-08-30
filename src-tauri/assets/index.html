@@ -181,10 +181,28 @@
     const newTabButton = document.getElementById("new-tab");
     const invoke = window.__TAURI__?.core?.invoke;
     let lastState = "";
+    let activeTabUrl = "";
+
+    async function copyText(text) {
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const input = document.createElement("textarea");
+        input.value = text;
+        input.style.position = "fixed";
+        input.style.opacity = "0";
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand("copy");
+        input.remove();
+      }
+    }
 
     async function refreshTabs() {
       if (!invoke) return;
       const tabs = await invoke("get_window_tabs", { windowId: "main" });
+      activeTabUrl = tabs.find((tab) => tab.is_active)?.url || "";
       const state = JSON.stringify(tabs);
       if (state === lastState) return;
       lastState = state;
@@ -241,7 +259,7 @@
       }
     }, { passive: false });
 
-    document.addEventListener("keydown", (event) => {
+    document.addEventListener("keydown", async (event) => {
       if (!invoke || !(event.ctrlKey || event.metaKey) || event.altKey) return;
       const key = event.key.toLowerCase();
       if (key === "t") {
@@ -257,6 +275,10 @@
           windowId: "main",
           direction: event.shiftKey ? -1 : 1
         });
+      } else if (key === "l") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        await copyText(activeTabUrl);
       }
     });
 

@@ -318,6 +318,21 @@ pub fn create_secure_webview_builder<R: Runtime>(
 fn tab_shortcuts_script(tab_id: &str, window_id: &str) -> String {
     format!(
         r#"
+async function copyCurrentUrl() {{
+  try {{
+    await navigator.clipboard.writeText(window.location.href);
+  }} catch {{
+    const input = document.createElement("textarea");
+    input.value = window.location.href;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }}
+}}
+
 document.addEventListener("keydown", async (event) => {{
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke || !(event.ctrlKey || event.metaKey) || event.altKey) return;
@@ -335,6 +350,10 @@ document.addEventListener("keydown", async (event) => {{
       windowId: "{window_id}",
       direction: event.shiftKey ? -1 : 1
     }});
+  }} else if (key === "l") {{
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    await copyCurrentUrl();
   }}
 }}, true);
 "#
