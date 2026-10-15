@@ -40,6 +40,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib
 - 起動時に親プロセスのネットワーク名前空間を切断する処理を廃止。一般ユーザーでも適用できる権限制限とWebKitGTKのサンドボックスを使用します。
 - 起動時は現在のNotionログイン画面 `https://app.notion.com/login` を開きます。古いホームURLを復元する場合も同じ画面へ進みます。
 - LinuxではOS側のウィンドウ枠と閉じる・最小化・最大化操作を使用します。
+- Linuxでは「Edit」「View」などのアプリ側のメニューバーを表示しません。
 - WebKitGTKが作る `about:blank` 初期文書を内部文書として扱います。その他の `about:` ページや外部への不正なプロトコルは許可しません。
 - `notion://`とNotionのHTTPSリンクを受け取り、起動時・起動済みの場合の両方で対象ページを開きます。リンクはNotionのドメインに限定します。
 - ユーザー領域に実行ファイル・リソース・アイコン・デスクトップ項目を配置するスクリプトを追加しました。

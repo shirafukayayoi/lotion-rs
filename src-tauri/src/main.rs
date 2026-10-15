@@ -345,7 +345,8 @@ fn main() {
 
             let handle = app.handle().clone();
 
-            // Native Menu Setup
+            // Linuxでは上部のメニューバーを作成しない。
+            #[cfg(not(target_os = "linux"))]
             let _ = lotion_rs::menu::create_main_menu(&handle);
 
             let security_state = handle
