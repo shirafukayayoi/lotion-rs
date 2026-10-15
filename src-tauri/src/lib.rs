@@ -1,4 +1,5 @@
 pub mod litebox;
+pub mod launch;
 pub mod security;
 pub mod tab_controller;
 pub mod tab_manager;

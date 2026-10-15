@@ -1,53 +1,30 @@
 #![cfg(target_os = "linux")]
-//! Linux-specific LiteBox implementations using namespaces and seccomp.
-//! Note: Tauri/WebKitGTK relies on bwrap internally when the sandbox is enabled,
-//! but this provides defense-in-depth resource dropping for the main process.
+//! LinuxではWebKitGTKの子プロセス用サンドボックスと親プロセスの権限制限を使う。
 
 use std::fs;
 
 pub fn apply_linux_sandbox() -> Result<(), String> {
-    log::info!("Applying Linux filesystem/capability restrictions");
-
-    #[cfg(target_os = "linux")]
-    unsafe {
-        // 1. Unshare namespaces for isolation
-        // CLONE_NEWNS: Mount namespace
-        // CLONE_NEWUTS: Hostname namespace
-        // CLONE_NEWIPC: IPC namespace
-        // CLONE_NEWPID: PID namespace (this process becomes PID 1 in the new namespace)
-        // CLONE_NEWNET: Network namespace (no network access)
-        let flags = libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC | libc::CLONE_NEWPID | libc::CLONE_NEWNET;
-        
-        // Note: unshare(CLONE_NEWUSER) is often needed if not running as root,
-        // but it can complicate resource access. We'll stick to basic resource dropping
-        // if unshare fails or is restricted by sysctl.
-        if libc::unshare(flags) != 0 {
-            let error_message = format!("LiteBox: Failed to unshare namespaces (might lack CAP_SYS_ADMIN or user namespaces restricted): {}", std::io::Error::last_os_error());
-            log::error!("{}", error_message);
-            return Err(error_message);
-        } else {
-            log::info!("LiteBox: Full namespace isolation enforced (NS, UTS, IPC, PID, NET).");
-        }
-
-        // 2. Disable core dumps and ptrace attachments
-        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
-        log::info!("LiteBox: Process dumpable flag disabled.");
-
-        // 3. Prevent gaining new privileges
-        libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-        log::info!("LiteBox: PR_SET_NO_NEW_PRIVS enforced.");
-
-        // 4. Drop all capabilities
-        // Note: This requires the process to have some caps to begin with or be root.
-        // For a desktop app, we mostly rely on the namespaces above.
+    // 親のネットワークを切断せず、Webコンテンツの分離をWebKitGTKに任せる。
+    if std::env::var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS").as_deref() == Ok("1") {
+        return Err("WebKitのサンドボックスを無効にする設定が有効です".into());
     }
+    std::env::set_var("WEBKIT_FORCE_SANDBOX", "1");
 
+    // 一般ユーザーでも適用できる制限を使い、失敗した場合は起動を中止する。
+    for (option, value) in [(libc::PR_SET_DUMPABLE, 0), (libc::PR_SET_NO_NEW_PRIVS, 1)] {
+        if unsafe { libc::prctl(option, value, 0, 0, 0) } != 0 {
+            return Err(format!(
+                "Linuxの権限制限に失敗しました: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+    log::info!("WebKitGTKサンドボックスを強制し、親プロセスの権限昇格とコアダンプを禁止しました");
     Ok(())
 }
 
 pub fn get_open_fd_count() -> usize {
-    match fs::read_dir("/proc/self/fd") {
-        Ok(entries) => entries.count(),
-        Err(_) => 0,
-    }
+    fs::read_dir("/proc/self/fd")
+        .map(|entries| entries.count())
+        .unwrap_or(0)
 }

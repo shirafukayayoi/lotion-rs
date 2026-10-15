@@ -11,6 +11,14 @@ impl Default for PolicyManager {
 }
 
 impl PolicyManager {
+    /// アプリ操作コマンドはNotionの実際のアプリ配信元に限定する。
+    pub fn command_origin_allowed(value: &str) -> bool {
+        let Ok(url) = url::Url::parse(value) else { return false; };
+        if !url.username().is_empty() || url.password().is_some() { return false; }
+        if url.scheme() == "tauri" { return url.host_str() == Some("localhost"); }
+        url.scheme() == "https" && url.port_or_known_default() == Some(443)
+            && matches!(url.host_str(), Some("www.notion.so" | "notion.so" | "app.notion.com"))
+    }
     pub fn new() -> Self {
         Self {
             allowed_domains: vec![
@@ -18,6 +26,7 @@ impl PolicyManager {
                 "www.notion.so".to_string(),
                 "notion.com".to_string(),
                 "www.notion.com".to_string(),
+                "notion.site".to_string(),
                 "msgstore.www.notion.so".to_string(),
                 "file.notion.so".to_string(),
             ],
@@ -40,6 +49,10 @@ impl PolicyManager {
 
 impl PolicyEnforcer for PolicyManager {
     fn validate_url(&self, url: &str) -> bool {
+        // WebKitGTKが作る空の初期文書だけは、外部遷移と区別して許可する。
+        if url == "about:blank" {
+            return true;
+        }
         log::debug!("PolicyManager: Validating URL: {}", url);
         // Parse URL and check if host is in allowed_domains
         if let Ok(parsed_url) = url::Url::parse(url) {
@@ -116,6 +129,9 @@ impl PolicyEnforcer for PolicyManager {
     }
 
     fn should_route_popup_to_system_browser(&self, url: &str) -> bool {
+        if url == "about:blank" {
+            return false;
+        }
         if let Ok(parsed_url) = url::Url::parse(url) {
             if let Some(host) = parsed_url.host_str() {
                 // If it's an official Notion domain or OAuth provider, keep it in the app
@@ -139,6 +155,24 @@ impl PolicyEnforcer for PolicyManager {
 mod tests {
     use super::*;
     use crate::traits::PolicyEnforcer;
+    #[test]
+    fn application_commands_require_exact_origin() {
+        assert!(PolicyManager::command_origin_allowed("https://app.notion.com/login"));
+        assert!(PolicyManager::command_origin_allowed("https://www.notion.so/page"));
+        for url in ["https://www.notion.so.evil.example/page", "https://app.notion.com:8443/", "http://app.notion.com", "https://accounts.google.com/"] {
+            assert!(!PolicyManager::command_origin_allowed(url));
+        }
+    }
+
+    #[test]
+    fn webkit_blank_document_is_internal() {
+        let policy = PolicyManager::new();
+        assert!(policy.validate_url("about:blank"));
+        assert!(!policy.should_route_popup_to_system_browser("about:blank"));
+        assert!(!policy.validate_external_link("about:blank"));
+        assert!(!policy.validate_url("about:config"));
+        assert!(!policy.validate_url("about:blank.evil"));
+    }
 
     #[test]
     fn test_should_route_popup_to_system_browser() {
@@ -165,6 +199,7 @@ mod tests {
         assert!(policy.validate_url("https://www.notion.so"));
         assert!(policy.validate_url("https://www.notion.so/login"));
         assert!(policy.validate_url("https://notion.com/some-page"));
+        assert!(policy.validate_url("https://team.notion.site/some-page"));
         assert!(policy.validate_url("https://msgstore.www.notion.so/v1/health"));
         
         // OAuth providers allowed during login

@@ -4,7 +4,8 @@
 node_modules
 out
 official_notion
-docs
+docs/*
+!docs/LINUX_JA.md
 dist-tauri
 notion_*/
 original/

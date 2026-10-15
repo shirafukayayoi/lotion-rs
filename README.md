@@ -1,3 +1,5 @@
+Linux向けの導入手順: [このforkのLinux用ガイド](docs/LINUX_JA.md)
+
 <p align="center">
   <img width="60%" height="60%" src="./docs/images/Banner.png" alt="Lotion — Native Rust Desktop App for Notion.so">
 </p>

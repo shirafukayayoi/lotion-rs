@@ -51,17 +51,9 @@ fn get_or_create_app_secret() -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
 // Helper function to check if the command invocation origin is trusted
 fn is_trusted_origin<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> bool {
-    // In a real application, this list of trusted origins would be configurable
-    // and potentially loaded from a secure source.
-    let trusted_origins = vec![
-        "https://www.notion.so",
-        "https://lotion.app", // Example of a self-controlled origin
-        "tauri://localhost", // For local development/devtools
-    ];
-
     if let Ok(url) = webview.url() {
         let origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or_default());
-        let is_trusted = trusted_origins.iter().any(|o| origin.starts_with(o));
+        let is_trusted = PolicyManager::command_origin_allowed(url.as_str());
         if !is_trusted {
             log::warn!("Untrusted origin: {} attempted to invoke command.", origin);
         }
@@ -147,7 +139,7 @@ fn new_tab(
     if !is_trusted_origin(&webview) {
         return; // Deny access for untrusted origins
     }
-    let notion_url = "https://www.notion.so";
+    let notion_url = "https://app.notion.com/login";
     if let Ok(new_id) = orchestrator.create_tab(&app, &window_id, notion_url) {
         let _ = orchestrator.show_tab(&new_id);
 
@@ -317,11 +309,12 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if let Some(window) = app.get_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            lotion_rs::launch::open_from_args(app, &args);
         }))
         .invoke_handler(tauri::generate_handler![
             lotion_rs::i18n::get_translation,

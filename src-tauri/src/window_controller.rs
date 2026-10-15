@@ -12,7 +12,7 @@ impl<R: Runtime> WindowController<R> {
         let window = WindowBuilder::new(app, "main")
             .title("lotion-rs")
             .inner_size(1200.0, 768.0)
-            .decorations(cfg!(target_os = "windows"))
+            .decorations(cfg!(any(target_os = "windows", target_os = "linux")))
             .build()?;
 
         // Ensure window state exists in AppState
@@ -131,9 +131,10 @@ impl<R: Runtime> WindowController<R> {
         };
 
         let config = app.state::<crate::config::LotionConfig>();
+        let launch_url = std::env::args().skip(1).find_map(|arg| crate::launch::notion_url(&arg));
         let mut tabs_restored = false;
 
-        if config.restore_tabs {
+        if config.restore_tabs && launch_url.is_none() {
             let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
             let mut app_state = app_state_lock.blocking_lock();
 
@@ -149,7 +150,7 @@ impl<R: Runtime> WindowController<R> {
 
                 for old_id in &old_tab_ids {
                     if let Some(tab_state) = app_state.tabs.get(old_id) {
-                        let url = tab_state.url.clone();
+                        let url = crate::launch::notion_url(&tab_state.url).unwrap_or_else(|| tab_state.url.clone());
                         // Drop the borrow of app_state so we can call create_tab (which might use it)
                         // and re-borrow window_state to update it.
                         // Actually, create_tab doesn't need a lock on app_state, but we need to update window_state.
@@ -167,7 +168,7 @@ impl<R: Runtime> WindowController<R> {
         }
 
         if !tabs_restored {
-            let notion_url = "https://www.notion.so";
+            let notion_url = launch_url.as_deref().unwrap_or("https://app.notion.com/login");
             log::info!(
                 "WindowController: Creating initial tab for Notion: {}",
                 notion_url
@@ -176,6 +177,9 @@ impl<R: Runtime> WindowController<R> {
 
             let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
             let mut app_state = app_state_lock.blocking_lock();
+            app_state.tabs.insert(tab_id.clone(), crate::state::TabState {
+                id: tab_id.clone(), title: "Notion".into(), url: notion_url.into(), is_active: true, is_pinned: false,
+            });
             if let Some(window_state) = app_state.windows.get_mut(self.window.label()) {
                 window_state.tab_ids.push(tab_id.clone());
             }

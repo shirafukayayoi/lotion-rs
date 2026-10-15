@@ -252,7 +252,7 @@ impl<R: Runtime> TabController<R> {
         "#,
             tab_id,
             window_id,
-            cfg!(target_os = "windows")
+            cfg!(any(target_os = "windows", target_os = "linux"))
         );
         let _ = webview.eval(&title_observer_js);
 
@@ -416,7 +416,7 @@ pub fn create_secure_webview_builder<R: Runtime>(
                             }
                         }
                         "tab:new" => {
-                            let notion_url = "https://www.notion.so";
+                            let notion_url = "https://app.notion.com/login";
                             if let Some(orchestrator) =
                                 nav_app.try_state::<Arc<dyn crate::traits::TabOrchestrator<R>>>()
                             {
