@@ -18,12 +18,18 @@ pub struct WindowConfig {
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub maximized: bool,
+    #[serde(default = "default_native_titlebar")]
+    pub native_titlebar: bool,
+}
+
+fn default_native_titlebar() -> bool {
+    cfg!(target_os = "windows")
 }
 
 impl Default for LotionConfig {
     fn default() -> Self {
         Self {
-            active_theme: "dracula".to_string(),
+            active_theme: "default".to_string(),
             custom_css_path: None,
             restore_tabs: true,
             window: WindowConfig {
@@ -32,6 +38,7 @@ impl Default for LotionConfig {
                 x: None,
                 y: None,
                 maximized: false,
+                native_titlebar: default_native_titlebar(),
             },
         }
     }
@@ -145,6 +152,30 @@ impl LotionConfig {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn old_config_keeps_window_settings_without_titlebar_option() {
+        let config: LotionConfig = toml::from_str(r#"
+            active_theme = "dracula"
+            restore_tabs = true
+            [window]
+            width = 960.0
+            height = 720.0
+            maximized = true
+        "#).unwrap();
+        assert_eq!(config.window.width, 960.0);
+        assert!(config.window.maximized);
+        assert_eq!(config.window.native_titlebar, default_native_titlebar());
+    }
+
+    #[test]
+    fn titlebar_preference_survives_config_round_trip() {
+        let mut config = LotionConfig::default();
+        config.window.native_titlebar = true;
+        let restored: LotionConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert!(restored.window.native_titlebar);
+        assert_eq!(restored.active_theme, "default");
+    }
 
     #[test]
     fn test_config_migration() {

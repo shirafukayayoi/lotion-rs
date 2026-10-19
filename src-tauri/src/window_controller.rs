@@ -12,7 +12,7 @@ impl<R: Runtime> WindowController<R> {
         let window = WindowBuilder::new(app, "main")
             .title("lotion-rs")
             .inner_size(1200.0, 768.0)
-            .decorations(cfg!(any(target_os = "windows", target_os = "linux")))
+            .decorations(app.state::<crate::config::LotionConfig>().window.native_titlebar)
             .build()?;
 
         // Ensure window state exists in AppState
@@ -74,12 +74,7 @@ impl<R: Runtime> WindowController<R> {
             }
             tauri::WindowEvent::Resized(size) => {
                 log::debug!("Window {} resized to {:?}", window_label, size);
-                if let Some(w) = app_handle.get_window(&window_label) {
-                    let webviews = w.webviews();
-                    for webview in webviews {
-                        let _ = webview.set_size(*size);
-                    }
-                }
+                // WebviewBuilderのauto_resizeで表示領域を親ウィンドウへ追従させる。
                 let app_state_lock =
                     app_handle.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
                 let mut app_state = app_state_lock.blocking_lock();
@@ -132,59 +127,69 @@ impl<R: Runtime> WindowController<R> {
 
         let config = app.state::<crate::config::LotionConfig>();
         let launch_url = std::env::args().skip(1).find_map(|arg| crate::launch::notion_url(&arg));
-        let mut tabs_restored = false;
+        // 状態の読み取りと画面作成を分離する。ロック中にUIを呼ぶと、
+        // メインスレッドのフォーカス／リサイズイベントと待ち合ってしまう。
+        let state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
+        let (restored_tabs, old_active) = {
+            let state = state_lock.blocking_lock();
+            if config.restore_tabs && launch_url.is_none() {
+                if let Some(window) = state.windows.get(self.window.label()) {
+                    let tabs = window.tab_ids.iter()
+                        .filter_map(|id| state.tabs.get(id).cloned())
+                        .collect::<Vec<_>>();
+                    (tabs, window.active_tab_id.clone())
+                } else {
+                    (Vec::new(), None)
+                }
+            } else {
+                (Vec::new(), None)
+            }
+        };
 
-        if config.restore_tabs && launch_url.is_none() {
-            let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
-            let mut app_state = app_state_lock.blocking_lock();
-
-            // Find state for THIS window
-            let window_label = self.window.label();
-            if let Some(window_state) = app_state.windows.get_mut(window_label) {
-                log::info!(
-                    "WindowController: Restoring {} tabs from saved state.",
-                    window_state.tab_ids.len()
-                );
-                let old_tab_ids = window_state.tab_ids.clone();
-                window_state.tab_ids.clear();
-
-                for old_id in &old_tab_ids {
-                    if let Some(tab_state) = app_state.tabs.get(old_id) {
-                        let url = crate::launch::notion_url(&tab_state.url).unwrap_or_else(|| tab_state.url.clone());
-                        // Drop the borrow of app_state so we can call create_tab (which might use it)
-                        // and re-borrow window_state to update it.
-                        // Actually, create_tab doesn't need a lock on app_state, but we need to update window_state.
-                        let new_tab_id = tab_manager.create_tab(app, window_label, &url)?;
-
-                        // Re-fetch window_state to avoid borrow conflict
-                        if let Some(ws) = app_state.windows.get_mut(window_label) {
-                            ws.tab_ids.push(new_tab_id.clone());
-                        }
-                        let _ = tab_manager.show_tab(&new_tab_id);
-                        tabs_restored = true;
-                    }
+        let source_tabs = if restored_tabs.is_empty() {
+            vec![crate::state::TabState {
+                id: String::new(),
+                title: "Notion".into(),
+                url: launch_url.unwrap_or_else(|| "https://app.notion.com/login".into()),
+                is_active: true,
+                is_pinned: false,
+            }]
+        } else {
+            restored_tabs
+        };
+        let mut created_tabs = Vec::new();
+        let mut active_id = None;
+        for mut tab in source_tabs {
+            let url = crate::launch::notion_url(&tab.url).unwrap_or(tab.url.clone());
+            let id = tab_manager.create_tab(app, self.window.label(), &url)?;
+            if old_active.as_ref() == Some(&tab.id) || (old_active.is_none() && tab.is_active) {
+                active_id = Some(id.clone());
+            }
+            tab.id = id;
+            tab.url = url;
+            created_tabs.push(tab);
+        }
+        let active_id = active_id.or_else(|| created_tabs.last().map(|tab| tab.id.clone()));
+        {
+            let mut state = state_lock.blocking_lock();
+            let ids = created_tabs.iter().map(|tab| tab.id.clone()).collect::<Vec<_>>();
+            if let Some(window) = state.windows.get_mut(self.window.label()) {
+                let old_ids = std::mem::replace(&mut window.tab_ids, ids);
+                window.active_tab_id = active_id.clone();
+                for id in old_ids {
+                    state.tabs.remove(&id);
                 }
             }
-        }
-
-        if !tabs_restored {
-            let notion_url = launch_url.as_deref().unwrap_or("https://app.notion.com/login");
-            log::info!(
-                "WindowController: Creating initial tab for Notion: {}",
-                notion_url
-            );
-            let tab_id = tab_manager.create_tab(app, self.window.label(), notion_url)?;
-
-            let app_state_lock = app.state::<Arc<tokio::sync::Mutex<crate::state::AppState>>>();
-            let mut app_state = app_state_lock.blocking_lock();
-            app_state.tabs.insert(tab_id.clone(), crate::state::TabState {
-                id: tab_id.clone(), title: "Notion".into(), url: notion_url.into(), is_active: true, is_pinned: false,
-            });
-            if let Some(window_state) = app_state.windows.get_mut(self.window.label()) {
-                window_state.tab_ids.push(tab_id.clone());
+            for mut tab in created_tabs {
+                tab.is_active = active_id.as_ref() == Some(&tab.id);
+                state.tabs.insert(tab.id.clone(), tab);
             }
-
-            let _ = tab_manager.show_tab(&tab_id);
+            if let Some(secret) = app.try_state::<Arc<Vec<u8>>>() {
+                let _ = state.save_to_disk(secret.inner().as_slice());
+            }
+        }
+        if let Some(id) = active_id {
+            tab_manager.show_tab(&id)?;
         }
 
         Ok(())

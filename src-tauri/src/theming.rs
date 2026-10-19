@@ -17,7 +17,7 @@ impl Default for ThemeManager {
 impl ThemeManager {
     pub fn new() -> Self {
         Self {
-            active_theme: RwLock::new("dracula".to_string()),
+            active_theme: RwLock::new("default".to_string()),
             custom_css_path: RwLock::new(None),
         }
     }
@@ -32,7 +32,7 @@ impl ThemeManager {
     fn generate_notion_variables(&self, theme_name: &str) -> String {
         match theme_name {
             "dracula" => r#"
-                :root.dark {
+                :is(:root.dark, .notion-dark-theme) {
                     --theme--bg: #282a36;
                     --theme--fg: #44475a;
                     --theme--text: #f8f8f2;
@@ -42,11 +42,14 @@ impl ThemeManager {
                     --theme--interactive_hover: #ff79c6;
                     --theme--divider: #6272a4;
                 }
-                .notion-sidebar, .notion-topbar { background: #21222c !important; }
+                :is(:root.dark, .notion-dark-theme) .notion-sidebar,
+                :is(:root.dark, .notion-dark-theme) .notion-topbar {
+                    background: #21222c !important;
+                }
             "#
             .to_string(),
             "nord" => r#"
-                :root.dark {
+                :is(:root.dark, .notion-dark-theme) {
                     --theme--bg: #2e3440;
                     --theme--fg: #3b4252;
                     --theme--text: #eceff4;
@@ -64,18 +67,35 @@ impl ThemeManager {
     }
 }
 
+// CSSをJavaScriptの文字列として渡し、テンプレート式の誤実行を防ぐ。
+fn style_script(id: &str, css: &str) -> String {
+    let id = serde_json::to_string(id).expect("スタイルIDの変換に失敗");
+    let css = serde_json::to_string(css).expect("CSSの変換に失敗");
+    format!(r#"(() => {{
+        const apply = () => {{
+            const css = {css};
+            let style = document.getElementById({id});
+            if (!css) {{
+                style?.remove();
+                return;
+            }}
+            if (!style) {{
+                style = document.createElement('style');
+                style.id = {id};
+                document.head.appendChild(style);
+            }}
+            style.textContent = css;
+        }};
+        if (document.head) apply();
+        else document.addEventListener('DOMContentLoaded', apply, {{ once: true }});
+    }})();"#)
+}
+
 impl<R: Runtime> ThemingEngine<R> for ThemeManager {
     fn get_theme_css(&self, theme_name: &str) -> String {
         let vars = self.generate_notion_variables(theme_name);
-        if vars.is_empty() {
-            return "".to_string();
-        }
-        format!("(function() {{
-            const style = document.getElementById('lotion-theme-style') || document.createElement('style');
-            style.id = 'lotion-theme-style';
-            style.textContent = `{}`;
-            if (!style.parentElement) document.head.appendChild(style);
-        }})();", vars)
+        // 標準テーマへ戻した場合も、以前の上書きスタイルを取り除く。
+        style_script("lotion-theme-style", &vars)
     }
 
     fn get_custom_css(&self) -> String {
@@ -88,22 +108,13 @@ impl<R: Runtime> ThemingEngine<R> for ThemeManager {
                 match std::fs::read_to_string(path) {
                     Ok(css) => {
                         log::info!("Loaded custom CSS from {}", path.display());
-                        // Escape backticks and backslashes to prevent JavaScript injection
-                        let escaped_css = css
-                            .replace('`', "\\`")
-                            .replace('\\', "\\\\");
-                        return format!("(function() {{
-                            const style = document.getElementById('lotion-custom-style') || document.createElement('style');
-                            style.id = 'lotion-custom-style';
-                            style.textContent = `{}`;
-                            if (!style.parentElement) document.head.appendChild(style);
-                        }})();", escaped_css);
+                        return style_script("lotion-custom-style", &css);
                     }
                     Err(e) => log::warn!("Failed to read custom CSS: {}", e),
                 }
             }
         }
-        "".to_string()
+        style_script("lotion-custom-style", "")
     }
 
     fn inject_theme(&self, webview: &Webview<R>, theme_name: &str) {

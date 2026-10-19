@@ -1,6 +1,7 @@
 use crate::litebox::LiteBox;
 use crate::traits::{PolicyEnforcer, ThemingEngine};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tauri::webview::Webview;
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewBuilder, WebviewUrl};
 
@@ -8,6 +9,8 @@ pub struct TabController<R: Runtime> {
     pub tab_id: String,
     pub window_id: String,
     pub webview: Webview<R>,
+    title: Arc<RwLock<String>>,
+    visible: Arc<AtomicBool>,
 }
 
 impl<R: Runtime> TabController<R> {
@@ -40,22 +43,39 @@ impl<R: Runtime> TabController<R> {
             .map_err(|e| tauri::Error::AssetNotFound(e.to_string()))?;
 
         // Create a new webview for this tab using the secure factory
+        let title = Arc::new(RwLock::new("Notion".to_string()));
+        let visible = Arc::new(AtomicBool::new(false));
+        let current_title = title.clone();
+        let current_visible = visible.clone();
         let webview_builder =
-            create_secure_webview_builder(app, &tab_id, &url, window_id, policy.clone());
+            create_secure_webview_builder(app, &tab_id, &url, window_id, policy.clone())
+                .auto_resize()
+                .on_document_title_changed(move |webview, title| {
+                    let title = if title.trim().is_empty() { "Notion".to_string() } else { title };
+                    *current_title.write().expect("ページ名の書き込みに失敗") = title.clone();
+                    if current_visible.load(Ordering::Relaxed) {
+                        let _ = webview.window().set_title(&title);
+                    }
+                })
+                .on_page_load(|webview, payload| {
+                    if payload.event() == tauri::webview::PageLoadEvent::Finished
+                        && crate::policy::PolicyManager::command_origin_allowed(payload.url().as_str())
+                    {
+                        // 再読み込みや別ページへの移動後も最新の設定を適用する。
+                        let theming = webview.state::<Arc<dyn ThemingEngine<R>>>();
+                        theming.inject_theme(&webview, &theming.get_active_theme());
+                    }
+                });
 
         let inner_size = window.inner_size()?;
         let webview = window.add_child(
             webview_builder,
             tauri::LogicalPosition::new(0.0, 0.0),
-            tauri::LogicalSize::new(inner_size.width as f64, inner_size.height as f64),
+            // 物理ピクセルを論理サイズとして扱うと、HiDPI画面で領域がはみ出す。
+            inner_size,
         )?;
 
         log::info!("Created tab webview: {} in window: {}", tab_id, window_id);
-
-        // Inject theme from config (not hardcoded)
-        let theming = app.state::<Arc<dyn ThemingEngine<R>>>();
-        let active_theme = theming.get_active_theme();
-        theming.inject_theme(&webview, &active_theme);
 
         // Inject title observer and custom Mac-style Window Controls
         let title_observer_js = format!(
@@ -313,6 +333,8 @@ impl<R: Runtime> TabController<R> {
             tab_id,
             window_id: window_id.to_string(),
             webview,
+            title,
+            visible,
         })
     }
 
@@ -335,10 +357,14 @@ impl<R: Runtime> TabController<R> {
 
     pub fn show(&self) -> tauri::Result<()> {
         self.webview.show()?;
+        self.visible.store(true, Ordering::Relaxed);
+        let title = self.title.read().expect("ページ名の読み込みに失敗").clone();
+        self.webview.window().set_title(&title)?;
         Ok(())
     }
 
     pub fn hide(&self) -> tauri::Result<()> {
+        self.visible.store(false, Ordering::Relaxed);
         self.webview.hide()?;
         Ok(())
     }
