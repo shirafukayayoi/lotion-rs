@@ -6,6 +6,8 @@ pub mod tab_manager;
 pub mod theming;
 pub mod traits;
 pub mod window_controller;
+#[cfg(target_os = "linux")]
+pub mod linux_webview;
 
 pub mod config;
 pub mod i18n;

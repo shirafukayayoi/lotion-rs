@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LotionConfig {
     pub active_theme: String,
+    #[serde(default = "default_low_memory")]
+    pub low_memory: bool,
     pub custom_css_path: Option<PathBuf>,
     pub restore_tabs: bool,
     pub window: WindowConfig,
@@ -26,10 +28,15 @@ fn default_native_titlebar() -> bool {
     cfg!(target_os = "windows")
 }
 
+fn default_low_memory() -> bool {
+    cfg!(target_os = "linux")
+}
+
 impl Default for LotionConfig {
     fn default() -> Self {
         Self {
             active_theme: "default".to_string(),
+            low_memory: default_low_memory(),
             custom_css_path: None,
             restore_tabs: true,
             window: WindowConfig {
@@ -166,14 +173,17 @@ mod tests {
         assert_eq!(config.window.width, 960.0);
         assert!(config.window.maximized);
         assert_eq!(config.window.native_titlebar, default_native_titlebar());
+        assert_eq!(config.low_memory, default_low_memory());
     }
 
     #[test]
     fn titlebar_preference_survives_config_round_trip() {
         let mut config = LotionConfig::default();
         config.window.native_titlebar = true;
+        config.low_memory = false;
         let restored: LotionConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert!(restored.window.native_titlebar);
+        assert!(!restored.low_memory);
         assert_eq!(restored.active_theme, "default");
     }
 

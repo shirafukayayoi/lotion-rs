@@ -50,6 +50,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib
 
 ## Waylandとログ
 
+Linuxでは控えめな省メモリ設定を標準で有効にしています。WebKitGTKのキャッシュモデルを `WebBrowser` から `DocumentBrowser` へ変更し、ページやリソースの保持量を控えめにします。戻る操作用のページキャッシュ、JavaScriptの高速実行、メディア機能は維持します。ログイン情報や編集中の文書を削除する処理は行いません。現在開いているNotion自体の使用量には大きな削減を見込めません。
+
+速度を優先する場合は、`~/.config/lotion-rs/config.toml` の先頭（`[window]` より前）に `low_memory = false` を設定して再起動すると、WebKitGTKの標準キャッシュへ戻せます。通信監視は通常無効で、調査時に `RUST_LOG=debug` を指定した場合のみ有効です。
+
 閉じるボタンなどのOS標準タイトルバーが必要な場合は、`~/.config/lotion-rs/config.toml` の `[window]` に `native_titlebar = true` を設定して再起動してください。標準配色を使う場合は、ファイル先頭の `active_theme = "default"` を指定します。明暗の切り替えはNotionの設定で行えます。
 
 WaylandセッションではWaylandバックエンドを選択します。X11を使いたい場合は次のように起動できます。

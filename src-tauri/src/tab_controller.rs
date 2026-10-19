@@ -77,6 +77,12 @@ impl<R: Runtime> TabController<R> {
 
         log::info!("Created tab webview: {} in window: {}", tab_id, window_id);
 
+        #[cfg(target_os = "linux")]
+        crate::linux_webview::configure(
+            &webview,
+            app.state::<crate::config::LotionConfig>().low_memory,
+        )?;
+
         // Inject title observer and custom Mac-style Window Controls
         let title_observer_js = format!(
             r#"
@@ -276,8 +282,9 @@ impl<R: Runtime> TabController<R> {
         );
         let _ = webview.eval(&title_observer_js);
 
-        // Inject network monitor — intercepts fetch and XHR to log status/errors
-        let network_monitor_js = r#"
+        // 通常利用ではfetch／XHRの監視や通信ごとのログ転送を行わない。
+        if log::log_enabled!(log::Level::Debug) {
+            let network_monitor_js = r#"
             (function() {
                 const log = (msg) => {
                     console.log(msg);
@@ -327,7 +334,8 @@ impl<R: Runtime> TabController<R> {
                 log('Network monitoring active.');
             })();
         "#;
-        let _ = webview.eval(network_monitor_js);
+            let _ = webview.eval(network_monitor_js);
+        }
 
         Ok(Self {
             tab_id,
